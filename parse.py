@@ -9,7 +9,7 @@ import numpy as np
 import utils
 
 class TextLoader():
-    def __init__(self, save_dir, batch_size=20, file_size=20000, utterance_dependency_length=5):
+    def __init__(self, save_dir, batch_size=64, file_size=20000, utterance_dependency_length=4):
         utils.makedirs_(save_dir)
         self.meta_file = os.path.join(save_dir, 'meta.pkl')
         self.parsed_dir = os.path.join(save_dir, 'parsed')
@@ -31,6 +31,7 @@ class TextLoader():
                        "utter", "action", "topic", "change-nick", "join",
                        "quit", "unknown", "end-event", "go", "pad",]
         self.vocab = dict(zip(self.chars, range(len(self.chars))))
+        self.n_chars = len(self.chars)
 
         self.blacklisted_channels = []
         self.whitelisted_channels = []
@@ -208,7 +209,7 @@ class TextLoader():
             channel_lengths = []
 
             print("Creating sequences...")
-            q = utils.CircularBufferQueue(max_elements=4)
+            q = utils.CircularBufferQueue(max_elements=utterance_dependency_length)
             q.put(event_to_input((None, ("join", map(self.vocab_value, "rhaps0dy")))))
             for i in range(self.channel_last_files[channel]):
                 chan_file = utils.load_f_n(inp_d, i)
