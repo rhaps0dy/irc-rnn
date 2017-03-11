@@ -1,5 +1,6 @@
 from random import randint
 import os
+import sys
 import re
 import datetime
 import unicodedata
@@ -9,7 +10,7 @@ import numpy as np
 import utils
 
 class TextLoader():
-    def __init__(self, save_dir, batch_size=64, file_size=20000, utterance_dependency_length=4):
+    def __init__(self, save_dir, batch_size=64, file_size=2000000, utterance_dependency_length=4):
         utils.makedirs_(save_dir)
         self.meta_file = os.path.join(save_dir, 'meta.pkl')
         self.parsed_dir = os.path.join(save_dir, 'parsed')
@@ -33,7 +34,7 @@ class TextLoader():
         self.vocab = dict(zip(self.chars, range(len(self.chars))))
         self.n_chars = len(self.chars)
 
-        self.blacklisted_channels = []
+        self.blacklisted_channels = ['#mpdm-rhaps0dy--tomaff--nish81-1', '#building-rukea']
         self.whitelisted_channels = []
 
 
@@ -162,7 +163,8 @@ class TextLoader():
                 if len(channels[channel]['events']) >= self.file_size:
                     flush_channel(channel)
         for c in channels:
-            flush_channel(c)
+            if len(c['events']) > 0:
+                flush_channel(c)
         self.save()
         return channels
 
@@ -209,74 +211,27 @@ class TextLoader():
             channel_lengths = []
 
             print("Creating sequences...")
-            q = utils.CircularBufferQueue(max_elements=utterance_dependency_length)
+            q = utils.CircularBufferQueue(max_elements=self.utterance_dependency_length)
             q.put(event_to_input((None, ("join", map(self.vocab_value, "rhaps0dy")))))
             for i in range(self.channel_last_files[channel]):
                 chan_file = utils.load_f_n(inp_d, i)
                 tmp_sequences = []
                 for time_event in chan_file["events"]:
-                    decoder = sum(q, channel_tag) # channel_tag + q[0] + q[1] ...
-                    # Reverse input for increased performance
-                    decoder.reverse()
+                    encoder = sum(q, channel_tag) # channel_tag + [q[0]] + [q[1]] ...
                     e = event_to_input(time_event)
-                    encoder = [self.vocab["go"]] + e
-                    channel_lengths.append((len(decoder), len(encoder),
+                    decoder = [self.vocab["go"]] + e + [self.vocab["pad"]]
+                    channel_lengths.append((len(encoder), len(decoder),
                                             len(channel_lengths)))
-                    tmp_sequences.append((decoder, encoder))
+                    tmp_sequences.append((encoder, decoder))
                     if q.full():
                         q.get()
                     q.put(e)
                 utils.dump_f_n(tmp_sequences, tmp_d, i)
 
-            print("Sorting by length...")
-            utils.external_sort(tmp_d, sorted_d, self.channel_last_files[channel], key=lambda t: (len(t[0]), len(t[1])))
 
-            print("Padding, creating minibatches...")
-
-            class OutTmp:
-                out_tmp = []
-                bsz = 0
-                max_len_d = 0
-                max_len_e = 0
-                out = []
-                def __init__(self, vocab):
-                    self.vocab = vocab
-
-                def flush_out_tmp(self):
-                    l = len(self.out_tmp)
-                    d_arr = [None]*l
-                    e_arr = [None]*l
-                    for j in range(l):
-                        pad_d = [self.vocab["pad"]]*(self.max_len_d - len(self.out_tmp[j][0]))
-                        pad_e = [self.vocab["pad"]]*(self.max_len_e - len(self.out_tmp[j][1]))
-                        d_arr[j] = pad_d + self.out_tmp[j][0]
-                        e_arr[j] = self.out_tmp[j][1] + pad_e
-                        assert(len(d_arr[j]) == self.max_len_d)
-                        assert(len(e_arr[j]) == self.max_len_e)
-
-                    self.out.append((np.array(d_arr), np.array(e_arr)))
-
-                    self.out_tmp = []
-                    self.bsz = 0
-                    self.max_len_d = 0
-                    self.max_len_e = 0
-
-            o = OutTmp(self.vocab)
-
-            for i in range(self.channel_last_files[channel]):
-                if len(o.out) != 0:
-                    utils.dump_f_n(o.out, out_d, i-1)
-                o.out = []
-
-                events = utils.load_f_n(sorted_d, i)
-                for event in events:
-                    o.out_tmp.append(event)
-                    o.max_len_d = max(o.max_len_d, len(event[0]))
-                    o.max_len_e = max(o.max_len_e, len(event[1]))
-                    o.bsz += 1
-                    if o.bsz == self.batch_size:
-                        o.flush_out_tmp()
-
-            o.flush_out_tmp()
-            i = self.channel_last_files[channel]-1
-            utils.dump_f_n(o.out, out_d, i)
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        print("Usage: {:s} <ZNC_logs_dir> <save_dir>".format(sys.argv[0]))
+        sys.exit(-1)
+    tl = TextLoader(sys.argv[2])
+    tl.parse_data(sys.argv[1])
