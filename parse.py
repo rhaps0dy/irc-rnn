@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 from random import randint
 import os
 import sys
@@ -8,6 +10,7 @@ import collections
 import codecs
 import numpy as np
 import utils
+import pickle
 
 class TextLoader():
     def __init__(self, save_dir, batch_size=64, file_size=2000000, utterance_dependency_length=4):
@@ -28,10 +31,20 @@ class TextLoader():
         # characters, plus others. The "unknown" character is meant to represent
         # any UTF-8 that is not just diacritics.
         self.chars = list(chr(i) for i in range(32, 127))
-        self.chars += ["start-channel", "start-self-nick", "start-sayer-nick",
+        # long-delay: the time since last event is more than 1 day
+        # medium-delay: the time since last event is between 2h and 1 day
+        # short-delay: the time since last event is between 2 min and 2h
+        self.chars += ["start-sayer-nick", "short-delay", "medium-delay", "long-delay",
                        "utter", "action", "topic", "change-nick", "join",
-                       "quit", "unknown", "end-event", "go", "pad",]
+                       "quit", "unknown", "end-event", "pad",]
         self.vocab = dict(zip(self.chars, range(len(self.chars))))
+        self.reverse_vocab = [None]*len(self.vocab)
+        for k, c in self.vocab.items():
+            self.reverse_vocab[c] = k
+
+        # Aliases
+        self.vocab['START'] = self.vocab['start-sayer-nick']
+        self.vocab['UNK'] = self.vocab['unknown']
         self.n_chars = len(self.chars)
 
         self.blacklisted_channels = ['#mpdm-rhaps0dy--tomaff--nish81-1', '#building-rukea']
@@ -163,24 +176,20 @@ class TextLoader():
                 if len(channels[channel]['events']) >= self.file_size:
                     flush_channel(channel)
         for c in channels:
-            if len(c['events']) > 0:
+            if len(channels[c]['events']) > 0:
                 flush_channel(c)
         self.save()
         return channels
 
 
     def create_samples(self):
-        def channel_self_to_input(channel, self_nick):
+        def channel_to_input(channel):
             l = []
             l.append(self.vocab["start-channel"])
-            l += map(self.vocab_value, channel)
-            l.append(self.vocab["start-self-nick"])
-            l += map(self.vocab_value, self_nick)
+            l += list(map(self.vocab_value, channel))
             return l
 
-        def event_to_input(time_event):
-            _time = time_event[0]
-            event = time_event[1]
+        def event_to_input(event):
             l = []
             l.append(self.vocab["start-sayer-nick"])
             l += list(event[1])
@@ -195,39 +204,38 @@ class TextLoader():
             l.append(self.vocab["end-event"])
             return l
 
-        n = 0
-
+        all_sequences = []
+        print("Creating sequences...")
         for channel in self.channel_last_files:
             print(channel)
             inp_d = os.path.join(self.parsed_dir, channel)
-            tmp_d = os.path.join(self.parsed_dir, "tmp_%s" % channel)
-            sorted_d = os.path.join(self.parsed_dir, "sorted_%s" % channel)
-            out_d = os.path.join(self.samples_dir, channel)
-            utils.makedirs_(tmp_d)
-            utils.makedirs_(sorted_d)
-            utils.makedirs_(out_d)
+            out_f = os.path.join(self.parsed_dir, "sequences.pkl")
 
-            channel_tag = channel_self_to_input(channel, "rhaps0dy")
-            channel_lengths = []
-
-            print("Creating sequences...")
-            q = utils.CircularBufferQueue(max_elements=self.utterance_dependency_length)
-            q.put(event_to_input((None, ("join", map(self.vocab_value, "rhaps0dy")))))
             for i in range(self.channel_last_files[channel]):
                 chan_file = utils.load_f_n(inp_d, i)
-                tmp_sequences = []
-                for time_event in chan_file["events"]:
-                    encoder = sum(q, channel_tag) # channel_tag + [q[0]] + [q[1]] ...
-                    e = event_to_input(time_event)
-                    decoder = [self.vocab["go"]] + e + [self.vocab["pad"]]
-                    channel_lengths.append((len(encoder), len(decoder),
-                                            len(channel_lengths)))
-                    tmp_sequences.append((encoder, decoder))
-                    if q.full():
-                        q.get()
-                    q.put(e)
-                utils.dump_f_n(tmp_sequences, tmp_d, i)
-
+                channel_sequences = []
+                prev_time = datetime.datetime.fromtimestamp(0)
+                prev_event = (None,)
+                for time, event in chan_file["events"]:
+                    if event[0] in ["join", "quit"] and prev_event[0] in ["join", "quit"]:
+                        # Prevent quit/join spam
+                        continue
+                    prev_event = event
+                    minutes_passed = (time-prev_time).total_seconds() / 60
+                    prev_time = time
+                    if minutes_passed > 1440:
+                        channel_sequences.append([self.vocab["long-delay"]])
+                        cur_seq = channel_sequences[-1]
+                    elif minutes_passed > 120:
+                        cur_seq.append(self.vocab["medium-delay"])
+                    elif minutes_passed > 2:
+                        cur_seq.append(self.vocab["short-delay"])
+                    cur_seq += event_to_input(event)
+                all_sequences += channel_sequences
+        for i, seq in enumerate(all_sequences):
+            all_sequences[i] = np.array(seq, dtype=np.int32)
+        with open(out_f, 'wb') as f:
+            pickle.dump(all_sequences, f)
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
@@ -235,3 +243,4 @@ if __name__ == '__main__':
         sys.exit(-1)
     tl = TextLoader(sys.argv[2])
     tl.parse_data(sys.argv[1])
+    tl.create_samples()
