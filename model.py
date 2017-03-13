@@ -139,10 +139,8 @@ class LSTMBase(Model):
         self.keep_prob = tf.placeholder(tf.float32, shape=[])
         self.input = tf.placeholder(tf.int32, shape=[None, bptt_length+1],
                                     name="input")
-        self.input_infer = tf.slice(self.input, [0, 0], [tf.shape(self.input)[0],
-                                                         bptt_length])
-        self.ground_truth = tf.slice(self.input, [0, 1], [tf.shape(self.input)[0],
-                                                          bptt_length])
+        self.input_infer = self.input[:,:bptt_length]
+        self.ground_truth = self.input[:,1:]
         self.max_batch_size = -1
         self.default_batch_size = batch_size
 
@@ -160,14 +158,15 @@ class LSTMBase(Model):
             dropout_keep_prob=self.keep_prob)
         cells = list(one_cell() for _ in range(num_layers))
         self.cell = tf.contrib.rnn.MultiRNNCell(cells)
-        initial_state_tf = self.create_initial_state_placeholder()
+        self.initial_state, initial_state_tf = (
+            self.create_initial_state_placeholder())
         self.rnn_outputs, next_state = tf.nn.dynamic_rnn(
             self.cell,
             inputs=self.embedded,
             sequence_length=self.sequence_length,
             initial_state=initial_state_tf,
             dtype=tf.float32)
-        self.create_next_state_tensor_list(next_state)
+        self.next_state = self.create_next_state_tensor_list(next_state)
 
         with tf.variable_scope("sequence_mask"):
             mask = tf.sequence_mask(self.sequence_length, bptt_length)
@@ -211,7 +210,7 @@ class LSTMBase(Model):
         return Optimizer(learning_rate=self.learning_rate_ph).minimize(self.loss)
 
     def create_initial_state_placeholder(self):
-        self.initial_state = []
+        initial_state = []
         initial_state_tf = []
         for j, sz in enumerate(self.cell.state_size):
             if isinstance(sz, int):
@@ -222,21 +221,22 @@ class LSTMBase(Model):
             for i, s in enumerate(sizes):
                 ph = tf.placeholder(tf.float32, shape=[None, s],
                     name='initial_state_{:d}_{:d}'.format(j, i))
-                self.initial_state.append(ph)
+                initial_state.append(ph)
                 l.append(ph)
             if len(l) > 1:
                 initial_state_tf.append(tf.contrib.rnn.LSTMStateTuple(*l))
             else:
                 initial_state_tf.append(l[0])
-        return tuple(initial_state_tf)
+        return initial_state, tuple(initial_state_tf)
 
-    def create_next_state_tensor_list(self, next_state):
-        self.next_state = []
-        for ns in next_state:
+    def create_next_state_tensor_list(self, next_state_tuple):
+        next_state = []
+        for ns in next_state_tuple:
             if isinstance(ns, tuple):
-                self.next_state += ns
+                next_state += ns
             else:
-                self.next_state.append(ns)
+                next_state.append(ns)
+        return next_state
 
     def new_epoch(self, batch_size=None):
         if batch_size is None:
@@ -286,6 +286,36 @@ class LSTMBase(Model):
             total_entropy_normalise += res[1]
             self.state = res[2:]
         return total_entropy/total_entropy_normalise
+
+    def generate_sequences(self, sess, seed, n_to_generate, strategy='sample'):
+        """seed: a Bxlen array or list of lists, where B is the number of
+        phrases that will be generated.
+        strategy: [sample, max] Whether to draw from the probability
+        distribution or take the maximum."""
+        log.debug("starting generate_sequences")
+        n_sequences = len(seed)
+        seed_len = len(seed[0])
+        inp_arr = np.zeros([n_sequences, int(self.input.get_shape()[1])],
+                           dtype=np.int32)
+        result = np.zeros([n_sequences, seed_len+n_to_generate],
+                          dtype=np.int32)
+        for i, s in enumerate(seed):
+            result[i,:seed_len] = s
+        self.new_epoch(batch_size=n_sequences)
+        log.debug("generating seeded hidden state")
+        inp_arr[:,:seed_len] = result[:,:seed_len]
+        fd = self.test_feed_dict((inp_arr, [seed_len]*n_sequences))
+        self.state = sess.run(self.next_state, fd)
+        seq_len_ones = np.ones([n_sequences], dtype=np.int32)
+        sess_out = [getattr(self, "prediction_"+strategy)] + self.next_state
+        for w in range(seed_len, seed_len+n_to_generate):
+            log.debug("generating element {:d} of {:d}"
+                      .format(w-seed_len+1, n_to_generate))
+            fd = self.test_feed_dict((inp_arr, seq_len_ones))
+            draw_result = sess.run(sess_out, fd)
+            inp_arr[:,0] = result[:,w] = draw_result[0]
+            self.state = draw_result[1:]
+        return result
 
 class SampledSoftmaxLSTM(LSTMBase):
     LOSS_FUNCTION = 'sampled_softmax'

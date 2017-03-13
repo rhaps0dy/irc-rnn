@@ -20,7 +20,7 @@ flags.DEFINE_boolean('log_to_stdout', False, 'Whether to output the python log '
                      'to stdout, or to a file')
 flags.DEFINE_string('input_type', 'character', '[word,character]')
 flags.DEFINE_string('out_file', 'out', 'the file to output test scores / sample phrases to')
-flags.DEFINE_string('command', 'train', 'What to do [train, test, compute_entropy]')
+flags.DEFINE_string('command', 'train', 'What to do [train, validation, test, generate_sample]')
 flags.DEFINE_boolean('embedding_trainable', True, 'Train embeddings?')
 flags.DEFINE_string('log_dir', './logs/', 'Base directory for logs')
 flags.DEFINE_string('model_dir', './model/', 'Base directory for model')
@@ -87,7 +87,9 @@ def main(_):
     log_dir, save_model_file, load_file = get_relevant_directories()
     tl = TextLoader("save")
     word_index = tl.vocab
+    word_index_f = lambda c: word_index[c]
     reverse_word_index = tl.reverse_vocab
+    reverse_word_index_f = lambda c: reverse_word_index[c]
     for k, v in enumerate(reverse_word_index):
         if len(v) > 1:
             reverse_word_index[k] = '('+v+')'
@@ -157,19 +159,11 @@ def main(_):
                         pdb.set_trace()
 
                     log.info("Generating 10 phrases:")
-                    cur_words = [word_index['START']]*10
-                    ws = [[] for _ in range(10)]
-                    m.new_epoch(batch_size=10)
-                    for w in range(20 if FLAGS.input_type == "word" else 100):
-                        d = m.test_feed_dict(([[cw]+[0]*FLAGS.bptt_len for cw
-                                               in cur_words], [1]*10))
-                        draw_result = sess.run([m.prediction_sample] + m.next_state, d)
-                        m.state = draw_result[1:]
-                        cur_words = draw_result[0]
-                        for j in range(len(cur_words)):
-                            ws[j].append(reverse_word_index[cur_words[j]])
-                    for w in ws:
-                        log.info("generated_phrase: " + "".join(w))
+                    generated_seqs = m.generate_sequences(sess,
+                        [[word_index['START']]]*10,
+                        20 if FLAGS.input_type == "word" else 100)
+                    for phrase in generated_seqs:
+                        log.info("".join(map(reverse_word_index_f, phrase)))
                     save_path = saver.save(sess, save_model_file, global_step=summary_t)
                     log.info("Model saved in file: {:s}, validation entropy {:.4f}"
                              .format(save_path, perplexity))
@@ -177,35 +171,22 @@ def main(_):
                                         FLAGS.min_learning_rate)
                     log.info("New learning rate is {:f}".format(learning_rate))
                 m.state = result[4:]
-    elif FLAGS.command == 'compute_entropy':
-        ent = m.compute_entropy(sess, validation)
-        print("The entropy is", ent)
-    elif FLAGS.command == 'test':
-        if not os.path.exists(FLAGS.out_file):
-            with open(FLAGS.out_file, 'w') as f:
-                f.write("Optimizer\nNonlinearity\nHidden units\nTraining\nValidation\nTest\n\n")
-        with open(FLAGS.out_file, 'a') as f:
-            f.write("{}\n{}\n{}\n".format(FLAGS.optimizer,
-                FLAGS.nonlinearity, FLAGS.hidden_units))
-            _acc, = sess.run([accuracy], feed_dict_from_data(training_data, dropout=1.0))
-            f.write("{:.4f}\n".format(_acc))
-            _acc, = sess.run([accuracy], feed_dict_from_data(validation_data, dropout=1.0))
-            f.write("{:.4f}\n".format(_acc))
-            _acc, = sess.run([accuracy], feed_dict_from_data(test_data, dropout=1.0))
-            f.write("{:.4f}\n\n".format(_acc))
-    elif FLAGS.command == 'print_stuff':
-        training.new_training_permutation()
+    elif FLAGS.command == 'validation':
         m.new_epoch()
-        for i, example in enumerate(training_test):
-            print(" ".join(reverse_word_index[i] for i in example[0][0]))
-            feed_dict = m.test_feed_dict(example)
-            predictions, entropy_sum, nsc, nsh = sess.run([m.prediction_max, m.entropy_sum,
-                m.next_state_c, m.next_state_h], feed_dict)
-            print("Entropy is", entropy_sum/len(predictions))
-            print(" ".join(reverse_word_index[i] for i in predictions))
-            input()
-
-
+        ent = m.compute_entropy(sess, validation)
+        print("Validation entropy:", ent)
+    elif FLAGS.command == 'test':
+        m.new_epoch()
+        m.compute_entropy(sess, test)
+        print("Test entropy:", ent)
+    elif FLAGS.command == 'generate_sample':
+        log.info("Generating sample...")
+        n_generate = 20
+        m.new_epoch(n_generate)
+        seed = list(map(word_index_f, ["long-delay", "start-sayer-nick"] + list("funcoooo") + ["utter"] + "hi, how are you?"+ ["end-event"]))
+        generated_seqs = m.generate_sequences(sess, [seed]*n_generate, 50)
+        for phrase in generated_seqs:
+            print("".join(map(reverse_word_index_f, phrase)))
     sess.close()
 
 if __name__ == '__main__':
